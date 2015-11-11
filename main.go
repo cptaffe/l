@@ -38,20 +38,17 @@ type Lexer struct {
   States []MatchNexter
 }
 
-// Update later
-type Token rune
-
 // Uses an array of possible MatchNexters
 // Each MatchNexters' Match function is called
 // exactly once per set of MatchNexters.
 // If Match returns true, then Next is called.
-func (l *Lexer) Lex(out chan Token) {
+func (l *Lexer) Lex(out chan rune) {
   defer close(out)
   for r := range l.Runes {
     var nextStates []MatchNexter
     for _, s := range l.States {
       if s.Match(r) {
-        out <- Token(r)
+        out <- r
         nextStates = append(nextStates, s.Next()...)
       }
     }
@@ -64,35 +61,40 @@ func (l *Lexer) Lex(out chan Token) {
 
 func main() {
   runes := make(chan rune)
-  out := make(chan Token)
+  out := make(chan rune)
+  loopMatcher := []MatchNexter{
+    MatchNexter(&State{
+      Matcher: func(r rune) bool {
+        return r == 'a'
+      },
+      Nexts: []MatchNexter{
+        MatchNexter(&State{
+          Matcher: func (r rune) bool {
+            return r == 'b'
+          },
+        }),
+      },
+    }),
+  }
+  // Generate loop to beginning of series,
+  // acts like (ab)* in regex.
+  loopMatcher[0].(*State).Nexts[0].(*State).Nexts = []MatchNexter{ loopMatcher[0] }
   l := Lexer{
     Runes: runes,
-    States: []MatchNexter{
-      MatchNexter(&State{
-        Matcher: func(r rune) bool {
-          return r == 'a'
-        },
-        Nexts: []MatchNexter{
-          MatchNexter(&State{
-            Matcher: func (r rune) bool {
-              return r == 'b'
-            },
-          }),
-        },
-      }),
-    },
+    States: loopMatcher,
   }
   // Asynchrounously lex input
   go l.Lex(out)
   // Asynchrounously create input and close channel.
   // On close of channel, l.Lex will close out.
   go func() {
-    runes <- 'a'
-    runes <- 'b'
+    for _, r := range "abababc" {
+      runes <- r
+    }
     close(runes)
   }()
   // Keep-alive until out is closed.
-  for t := range out {
-    fmt.Println("Found match '"+string(rune(t))+"'")
+  for r := range out {
+    fmt.Println("Found match '"+string(r)+"'")
   }
 }
