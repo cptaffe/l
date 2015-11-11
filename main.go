@@ -1,100 +1,137 @@
 package main
 
-import "fmt"
+import (
+  "fmt"
+  "os"
+  "bufio"
+)
 
 // Match-Nexter interface
 // Allows for magic to happen inside the type.
 type MatchNexter interface {
-  // Is this rune a match?
-  Match(rune) bool
   // Returns next possible states
-  Next() []MatchNexter
+  Match(rune) []MatchNexter
 }
 
 // Matching function used by State type
-type StateMatcherFunc func(rune) bool
+type StateMatcherFunc func(rune) []MatchNexter
 
 // State type implements MatchNexter
 type State struct {
   // Matcher Function returns true on a match.
   Matcher StateMatcherFunc
-  // Possible next states
-  // if this state is true.
-  Nexts []MatchNexter
 }
 
 // Returns true on matching rune
-func (s *State) Match(r rune) bool {
+func (s *State) Match(r rune) []MatchNexter {
   return s.Matcher(r)
 }
 
-// Returns possible next states
-func (s *State) Next() []MatchNexter {
-  return s.Nexts
+type Lexer struct {
+  States []MatchNexter
+  Hooks []Lexer
+  Matched string
 }
 
-type Lexer struct {
-  Runes <-chan rune
-  States []MatchNexter
+type Match struct {
+   Success bool
+   Match string
 }
 
 // Uses an array of possible MatchNexters
 // Each MatchNexters' Match function is called
 // exactly once per set of MatchNexters.
 // If Match returns true, then Next is called.
-func (l *Lexer) Lex(out chan rune) {
-  defer close(out)
-  for r := range l.Runes {
-    var nextStates []MatchNexter
-    for _, s := range l.States {
-      if s.Match(r) {
-        out <- r
-        nextStates = append(nextStates, s.Next()...)
+func (l *Lexer) Lex(runes <-chan rune) chan Match {
+  out := make(chan Match)
+  go func(runes <-chan rune) {
+    defer close(out)
+    for r := range runes {
+      var nextStates []MatchNexter
+      for _, s := range l.States {
+        if s != nil {
+          nextStates = append(nextStates, s.Match(r)...)
+        } else {
+          // Have encountered a possible exit condition,
+          // place a hook.
+          l.Hooks = append([]Lexer{ *l }, l.Hooks...)
+        }
+      }
+      l.States = nextStates
+      if len(l.States) == 0 {
+        if len(l.Hooks) > 0 {
+          out <- Match{ Success: true, Match: l.Hooks[0].Matched }
+        } else {
+          out <- Match{ Success: false, Match: l.Matched }
+        }
+        return // No more possible states.
+      } else {
+        l.Matched += string(r)
       }
     }
-    l.States = nextStates
-    if len(l.States) == 0 {
-      return // No more possible states.
-    }
+  }(runes)
+  return out
+}
+
+type RuneMatcher struct {
+  MatchRune rune
+  Nexts []MatchNexter
+}
+
+func (rm *RuneMatcher) Match(r rune) []MatchNexter {
+  if r == rm.MatchRune {
+    return rm.Nexts
+  } else {
+    return []MatchNexter{}
   }
+}
+
+// Creates chain of RuneMatchers to match
+// an entire string.
+func StringMatcher(match string) (first, last *RuneMatcher) {
+  for _, r := range match {
+    rm := &RuneMatcher{ MatchRune: r }
+    if last != nil {
+      last.Nexts = []MatchNexter{ MatchNexter(rm) }
+    } else {
+      first = rm
+    }
+    last = rm
+  }
+  return
 }
 
 func main() {
   runes := make(chan rune)
-  out := make(chan rune)
-  loopMatcher := []MatchNexter{
-    MatchNexter(&State{
-      Matcher: func(r rune) bool {
-        return r == 'a'
-      },
-      Nexts: []MatchNexter{
-        MatchNexter(&State{
-          Matcher: func (r rune) bool {
-            return r == 'b'
-          },
-        }),
-      },
-    }),
-  }
+
   // Generate loop to beginning of series,
   // acts like (ab)* in regex.
-  loopMatcher[0].(*State).Nexts[0].(*State).Nexts = []MatchNexter{ loopMatcher[0] }
+  first, last := StringMatcher("ab")
+  last.Nexts = []MatchNexter{ first, nil }
+
   l := Lexer{
-    Runes: runes,
-    States: loopMatcher,
+    States: []MatchNexter{ MatchNexter(first) },
   }
+
   // Asynchrounously lex input
-  go l.Lex(out)
+  out := l.Lex(runes)
+
   // Asynchrounously create input and close channel.
   // On close of channel, l.Lex will close out.
   go func() {
-    for _, r := range "abababc" {
+    line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+    for _, r := range line {
       runes <- r
     }
     close(runes)
   }()
+
   // Keep-alive until out is closed.
-  for r := range out {
-    fmt.Println("Found match '"+string(r)+"'")
+  for s := range out {
+    if s.Success {
+      fmt.Println("Found match '"+s.Match+"'")
+    } else {
+      fmt.Println("No match found, got: "+s.Match);
+    }
   }
 }
