@@ -4,17 +4,18 @@ import (
   "fmt"
   "os"
   "bufio"
+  "unicode"
 )
 
 // Match-Nexter interface
 // Allows for magic to happen inside the type.
-type MatchNexter interface {
+type Matcher interface {
   // Returns next possible states
-  Match(rune) []MatchNexter
+  Match(rune) []Matcher
 }
 
 // Matching function used by State type
-type StateMatcherFunc func(rune) []MatchNexter
+type StateMatcherFunc func(rune) []Matcher
 
 // State type implements MatchNexter
 type State struct {
@@ -23,14 +24,14 @@ type State struct {
 }
 
 // Returns true on matching rune
-func (s *State) Match(r rune) []MatchNexter {
+func (s *State) Match(r rune) []Matcher {
   return s.Matcher(r)
 }
 
 type Lexer struct {
-  States []MatchNexter
-  Hooks []Lexer
+  States []Matcher
   Matched string
+  Hooks []Lexer
 }
 
 type Match struct {
@@ -47,7 +48,7 @@ func (l *Lexer) Lex(runes <-chan rune) chan Match {
   go func(runes <-chan rune) {
     defer close(out)
     for r := range runes {
-      var nextStates []MatchNexter
+      var nextStates []Matcher
       for _, s := range l.States {
         if s != nil {
           nextStates = append(nextStates, s.Match(r)...)
@@ -75,14 +76,14 @@ func (l *Lexer) Lex(runes <-chan rune) chan Match {
 
 type RuneMatcher struct {
   MatchRune rune
-  Nexts []MatchNexter
+  Nexts []Matcher
 }
 
-func (rm *RuneMatcher) Match(r rune) []MatchNexter {
+func (rm *RuneMatcher) Match(r rune) []Matcher {
   if r == rm.MatchRune {
     return rm.Nexts
   } else {
-    return []MatchNexter{}
+    return []Matcher{}
   }
 }
 
@@ -92,7 +93,7 @@ func StringMatcher(match string) (first, last *RuneMatcher) {
   for _, r := range match {
     rm := &RuneMatcher{ MatchRune: r }
     if last != nil {
-      last.Nexts = []MatchNexter{ MatchNexter(rm) }
+      last.Nexts = []Matcher{ Matcher(rm) }
     } else {
       first = rm
     }
@@ -104,14 +105,64 @@ func StringMatcher(match string) (first, last *RuneMatcher) {
 func main() {
   runes := make(chan rune)
 
-  // Generate loop to beginning of series,
-  // acts like (ab)* in regex.
-  first, last := StringMatcher("ab")
-  last.Nexts = []MatchNexter{ first, nil }
-
-  l := Lexer{
-    States: []MatchNexter{ MatchNexter(first) },
+  matcher := func(f func(rune)[]Matcher) Matcher {
+    return Matcher(&State{ Matcher: f })
   }
+
+  // Digit state
+  var digit Matcher
+  digit = matcher(func(r rune) []Matcher {
+    if unicode.IsDigit(r) {
+      return []Matcher{ digit, nil }
+    } else {
+      return []Matcher{}
+    }
+  })
+
+  // Hex state
+  var hex Matcher
+  hex = matcher(func(r rune) []Matcher {
+    if unicode.Is(unicode.Hex_Digit, r) {
+      return []Matcher{ hex, nil }
+    } else {
+      return []Matcher{}
+    }
+  })
+
+  // Number State
+  numbf, numbl := StringMatcher("0b")
+  numcf, numcl := StringMatcher("0c")
+  numhf, numhl := StringMatcher("0x")
+
+  // Identifier state
+  var id Matcher
+  id = matcher(func(r rune) []Matcher {
+    if unicode.IsLetter(r) {
+      return []Matcher{ id, nil }
+    } else {
+      return []Matcher{}
+    }
+  })
+
+  // Whitespace state, parameterized
+  whitespace := func(m ...Matcher) Matcher {
+    var ws Matcher
+    ws = matcher(func(r rune) []Matcher {
+      if unicode.IsSpace(r) {
+        var a = []Matcher{ ws }
+        a = append(a, m...)
+        return a
+      } else {
+        return []Matcher{}
+      }
+    })
+    return ws
+  }
+
+  first, last := StringMatcher("var")
+  last.Nexts = []Matcher{ whitespace(id) }
+
+  l := Lexer{ States: []Matcher{ first } }
 
   // Asynchrounously lex input
   out := l.Lex(runes)
@@ -119,9 +170,11 @@ func main() {
   // Asynchrounously create input and close channel.
   // On close of channel, l.Lex will close out.
   go func() {
-    line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-    for _, r := range line {
-      runes <- r
+    rdr := bufio.NewReader(os.Stdin)
+    for line, _ := rdr.ReadString('\n'); len(line) > 0; {
+      for _, r := range line {
+        runes <- r
+      }
     }
     close(runes)
   }()
